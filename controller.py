@@ -33,34 +33,49 @@ robot_frame_id = "base_link"
 # Max linear velocity (m/s)
 max_linear_velocity = 0.5
 # Max angular velocity (rad/s)
-max_angular_velocity = 1.0
+max_angular_velocity = 0.5
 
 best_gain = 0
 best_path = None
 has_path = False
+
+gain_threshold = 20
 
 def on_goal_active():
     rospy.loginfo("Path goal sent, waiting for response...")
 
 def on_goal_feedback(feedback):
     global best_gain, best_path, has_path
-    if feedback.gain > best_gain:    # if newly received path is at least 2 times better, switch to that
-        best_gain = feedback.gain
-        best_path = feedback.path
+    if feedback.gain > gain_threshold:
+        move(feedback.path) 
+    # if feedback.gain > best_gain:
+    #     best_gain = feedback.gain
+    #     best_path = feedback.path
 
-    if not has_path:
-        has_path = True
-        move(best_path)
+    # if not has_path:
+    #     has_path = True
+    #     move(best_path)
 
 def on_goal_done(state, result):
+    global gain_threshold
     if state == actionlib.TerminalState.SUCCEEDED:
-        print result
+        if result.gain < (gain_threshold * 2):
+            gain_threshold = result.gain / 2
+        # best_gain = result.gain
+        # best_path = result.path
+
+        # if not has_path:
+        #     has_path = True
+        #     move(best_path)
+    
     else:
         rospy.loginfo("Something went wrong...")
 
 def move(path):
     global control_client, robot_frame_id, pub, has_path
-    rate = rospy.Rate(10)
+    rate = rospy.Rate(20)
+
+    rospy.loginfo(atan2(0, 1))
 
     while path.poses:
         # Call service client with path
@@ -70,7 +85,7 @@ def move(path):
         new_path = res.new_path
         setpoint = res.setpoint
 
-        transform = tf_buffer.lookup_transform(setpoint.header.frame_id, "base_link", rospy.Time(0))
+        transform = tf_buffer.lookup_transform("map", "base_link", rospy.Time())
         transformed_setpoint = tf2_geometry_msgs.do_transform_point(setpoint, transform)
 
         # Transform Setpoint from service client
@@ -79,19 +94,29 @@ def move(path):
 
         # Create Twist message from the transformed Setpoint
 
+        rospy.loginfo(transformed_setpoint.point)
+
         twist_msg = Twist()
 
-        linear_vel = 0.5 * hypot(transformed_setpoint.point.x, transformed_setpoint.point.x)
-        if fabs(linear_vel) >= max_linear_velocity:
+        linear_vel = hypot(transformed_setpoint.point.x, transformed_setpoint.point.y)
+        if linear_vel >= max_linear_velocity:
             linear_vel = copysign(max_linear_velocity, linear_vel)
 
-        angular_vel = 4 * atan2(transformed_setpoint.point.y, transformed_setpoint.point.x)
+        angular_vel = fabs(atan2(transformed_setpoint.point.y, transformed_setpoint.point.x))
         if fabs(angular_vel) >= max_angular_velocity:
             angular_vel = copysign(max_angular_velocity, angular_vel)
-            linear_vel = 0
+
+        # rospy.loginfo(angular_vel)
+        
+        if fabs(angular_vel) > (0.75 * max_angular_velocity):
+            linear_vel *= 0.2
+        # elif fabs(angular_vel) < 0.05:
+        #     angular_vel = 0
 
         twist_msg.linear.x = linear_vel
         twist_msg.angular.z = angular_vel
+
+        # rospy.loginfo(twist_msg)
 
         # Publish Twist
         pub.publish(twist_msg)
@@ -99,7 +124,13 @@ def move(path):
         
         path = new_path
 
-    has_path = False
+    rospy.loginfo("Path exhausted, getting new path...")
+
+    zero_twist_msg = Twist()
+    pub.publish(zero_twist_msg)
+
+    get_path()
+
     # Call service client again if the returned path is not empty and do stuff again
 
     # Send 0 control Twist to stop robot
@@ -109,6 +140,7 @@ def move(path):
 
 def get_path():
     global goal_client
+    rospy.loginfo("Getting path from action server...")
 
     goal = GetNextGoalActionGoal()  # no arguments for the goal needed
     goal_client.send_goal(goal, active_cb=on_goal_active, feedback_cb=on_goal_feedback, done_cb=on_goal_done)
